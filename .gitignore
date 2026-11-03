@@ -1,0 +1,26 @@
+# Données locales : conserver uniquement les dossiers
+/data/raw/*
+!/data/raw/.gitkeep
+/data/processed/*
+!/data/processed/.gitkeep
+
+# Secrets et configuration locale
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*credentials*.json
+*token*.json
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Fichiers temporaires et éditeurs
+.DS_Store
+.vscode/
+.idea/
