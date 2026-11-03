@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import random
 from pathlib import Path
 
 import aiohttp
@@ -13,9 +14,15 @@ URL = (
 WHERE = 'code_insee_region = "44" AND startswith(date, "2025-01-")'
 PAGE_SIZE = 100
 MAX_CONCURRENT = 5
+MAX_RETRIES = 3
 RAW_DIR = Path("data/raw")
+CHECKPOINT = RAW_DIR / "eco2mix_grand_est_2025_01_checkpoint.json"
 
 semaphore = asyncio.Semaphore(MAX_CONCURRENT)
+
+
+def page_path(page_number):
+    return RAW_DIR / f"eco2mix_grand_est_2025_01_page_{page_number:05d}.jsonl"
 
 
 async def fetch_page(session, offset):
@@ -25,19 +32,71 @@ async def fetch_page(session, offset):
         "limit": PAGE_SIZE,
         "offset": offset,
     }
-    async with semaphore:
-        async with session.get(URL, params=params) as response:
-            response.raise_for_status()
-            return await response.json()
+    for tentative in range(MAX_RETRIES):
+        try:
+            async with semaphore:
+                async with session.get(URL, params=params) as response:
+                    if response.status in (429, 500, 502, 503, 504):
+                        if tentative == MAX_RETRIES - 1:
+                            response.raise_for_status()
+                    else:
+                        response.raise_for_status()
+                        return await response.json()
+        except (asyncio.TimeoutError, aiohttp.ClientConnectionError, aiohttp.ClientPayloadError):
+            if tentative == MAX_RETRIES - 1:
+                raise
+
+        if tentative < MAX_RETRIES - 1:
+            delai = (2 ** tentative) + random.uniform(0, 1)
+            await asyncio.sleep(delai)
+
+    raise RuntimeError(f"Échec après {MAX_RETRIES} tentatives (offset={offset}).")
 
 
-def write_page(page_number, records):
-    path = RAW_DIR / f"eco2mix_grand_est_2025_01_page_{page_number:05d}.jsonl"
-    with path.open("w", encoding="utf-8") as f:
+def verifier_observation(record):
+    if str(record["code_insee_region"]) != "44" or not record["date"].startswith("2025-01-"):
+        raise ValueError("Enregistrement hors du Grand Est ou de janvier 2025")
+
+
+def compter_page_existante(page_number, attendu):
+    path = page_path(page_number)
+    if not path.exists():
+        return 0
+
+    nb_lignes = 0
+    with path.open("r", encoding="utf-8") as f:
+        for ligne in f:
+            record = json.loads(ligne)
+            verifier_observation(record)
+            nb_lignes += 1
+    if nb_lignes != attendu:
+        raise ValueError(f"Page {page_number} incomplète ({nb_lignes}/{attendu}).")
+    return nb_lignes
+
+
+def write_page(page_number, records, attendu):
+    if len(records) != attendu:
+        raise ValueError(f"Page {page_number} : {len(records)} lignes au lieu de {attendu}.")
+
+    path = page_path(page_number)
+    temporaire = path.with_suffix(".jsonl.tmp")
+    with temporaire.open("w", encoding="utf-8") as f:
         for record in records:
-            if record["code_insee_region"] != "44" or not record["date"].startswith("2025-01-"):
-                raise ValueError("Enregistrement hors du Grand Est ou de janvier 2025")
+            verifier_observation(record)
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    temporaire.replace(path)
+
+
+def pages_deja_collectees():
+    if CHECKPOINT.exists():
+        return set(json.loads(CHECKPOINT.read_text(encoding="utf-8")))
+    return set()
+
+
+def sauvegarder_checkpoint(pages):
+    temporaire = CHECKPOINT.with_suffix(".json.tmp")
+    temporaire.write_text(json.dumps(sorted(pages)), encoding="utf-8")
+    temporaire.replace(CHECKPOINT)
 
 
 async def main():
@@ -50,26 +109,54 @@ async def main():
         if not 0 < total <= 10000:
             raise ValueError(f"Nombre d'enregistrements inattendu : {total}")
 
-        write_page(0, first_page["results"])
-        collected = len(first_page["results"])
+        # On ne fait confiance au checkpoint que si chaque fichier est présent et valide.
+        checkpoint = pages_deja_collectees()
+        pages = set()
+        collected = 0
+        for offset in range(0, total, PAGE_SIZE):
+            page_number = offset // PAGE_SIZE
+            attendu = min(PAGE_SIZE, total - offset)
+            lignes = compter_page_existante(page_number, attendu)
+            if lignes:
+                pages.add(page_number)
+                collected += lignes
+
+        if pages != checkpoint:
+            sauvegarder_checkpoint(pages)
+        deja_presentes = len(pages)
+
+        if 0 not in pages:
+            attendu = min(PAGE_SIZE, total)
+            write_page(0, first_page["results"], attendu)
+            collected += attendu
+            pages.add(0)
+            sauvegarder_checkpoint(pages)
 
         for start in range(PAGE_SIZE, total, PAGE_SIZE * MAX_CONCURRENT):
-            offsets = list(
-                range(start, min(start + PAGE_SIZE * MAX_CONCURRENT, total), PAGE_SIZE)
-            )
-            pages = await asyncio.gather(
+            offsets = [
+                offset
+                for offset in range(start, min(start + PAGE_SIZE * MAX_CONCURRENT, total), PAGE_SIZE)
+                if offset // PAGE_SIZE not in pages
+            ]
+            if not offsets:
+                continue
+            resultats = await asyncio.gather(
                 *(fetch_page(session, offset) for offset in offsets)
             )
 
-            for offset, page in zip(offsets, pages):
-                records = page["results"]
-                write_page(offset // PAGE_SIZE, records)
-                collected += len(records)
+            for offset, page in zip(offsets, resultats):
+                attendu = min(PAGE_SIZE, total - offset)
+                page_number = offset // PAGE_SIZE
+                write_page(page_number, page["results"], attendu)
+                collected += attendu
+                pages.add(page_number)
+                sauvegarder_checkpoint(pages)
 
     if collected != total:
         raise ValueError(f"Collecte incomplète : {collected}/{total}")
 
     print(f"Collecte terminée : {collected} enregistrements.")
+    print(f"Pages déjà présentes : {deja_presentes}.")
     print(f"Fichiers JSON Lines enregistrés dans : {RAW_DIR}")
 
 
