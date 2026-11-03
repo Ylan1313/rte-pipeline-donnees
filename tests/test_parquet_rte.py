@@ -1,32 +1,23 @@
-"""Tests des fichiers Parquet issus de la collecte RTE."""
+"""Tests Pandas des fichiers Parquet issus de la collecte RTE."""
 
 import json
 from collections import defaultdict
+from datetime import date, datetime
 from pathlib import Path
 
-import pyarrow as pa
-import pyarrow.parquet as pq
+import pandas as pd
 import pytest
 
-from scripts.transform.transform_rte import heure_locale_inexistante
+from scripts.transform.transform_rte import (
+    TEXTES,
+    PUISSANCES,
+    POURCENTAGES,
+    heure_locale_inexistante,
+)
 
 RACINE = Path(__file__).resolve().parents[1]
 RAW_DIR = RACINE / "data" / "raw"
 PROCESSED_DIR = RACINE / "data" / "processed"
-
-TEXTES = ("code_insee_region", "libelle_region", "nature", "heure")
-PUISSANCES = (
-    "consommation", "thermique", "nucleaire", "eolien", "solaire",
-    "hydraulique", "pompage", "bioenergies", "ech_physiques",
-    "stockage_batterie", "destockage_batterie",
-    "eolien_terrestre", "eolien_offshore",
-)
-POURCENTAGES = (
-    "tco_thermique", "tch_thermique", "tco_nucleaire", "tch_nucleaire",
-    "tco_eolien", "tch_eolien", "tco_solaire", "tch_solaire",
-    "tco_hydraulique", "tch_hydraulique",
-    "tco_bioenergies", "tch_bioenergies",
-)
 
 
 def test_reperage_heures_inexistantes():
@@ -46,9 +37,8 @@ def test_reperage_heures_inexistantes():
 
 @pytest.fixture(scope="module")
 def fichiers_par_periode():
-    """Associe chaque fichier Parquet aux pages JSON Lines d'origine."""
+    """Associe les Parquet aux pages JSON Lines d'origine."""
     pages = defaultdict(list)
-
     for fichier in sorted(RAW_DIR.glob("*_page_*.jsonl")):
         prefixe, separateur, numero = fichier.stem.rpartition("_page_")
         if separateur and len(numero) == 5 and numero.isdigit():
@@ -65,9 +55,9 @@ def fichiers_par_periode():
 
 
 def test_parquet_lisibles_et_nombre_de_lignes(fichiers_par_periode):
-    """Chaque Parquet conserve les lignes brutes, sauf horaires inexistants."""
+    """Les heures inexistantes sont les seules lignes brutes écartées."""
     for prefixe, (chemin, fichiers_bruts) in fichiers_par_periode.items():
-        parquet = pq.ParquetFile(chemin)
+        df = pd.read_parquet(chemin)
         nb_brut = 0
         nb_ecartees = 0
         for fichier in fichiers_bruts:
@@ -81,55 +71,51 @@ def test_parquet_lisibles_et_nombre_de_lignes(fichiers_par_periode):
 
         assert nb_brut > 0, f"Aucune ligne brute : {prefixe}"
         attendu = nb_brut - nb_ecartees
-        assert parquet.metadata.num_rows == attendu, (
-            f"{prefixe} : {parquet.metadata.num_rows} lignes Parquet "
-            f"au lieu de {attendu} ({nb_brut} brutes - {nb_ecartees} exclues)."
+        assert len(df) == attendu, (
+            f"{prefixe} : {len(df)} lignes Parquet au lieu de "
+            f"{attendu} ({nb_brut} brutes - {nb_ecartees} exclues)."
         )
 
 
 def test_types_des_colonnes(fichiers_par_periode):
-    """Contrôle les types utiles pour les prochaines analyses SQL."""
+    """Contrôle avec Pandas les types utiles pour les analyses SQL."""
     for prefixe, (chemin, _) in fichiers_par_periode.items():
-        schema = pq.ParquetFile(chemin).schema_arrow
+        df = pd.read_parquet(chemin)
 
         for nom in TEXTES:
-            assert pa.types.is_string(schema.field(nom).type), f"{prefixe} : {nom} n'est pas du texte"
-        assert pa.types.is_date32(schema.field("date").type), f"{prefixe} : type de date incorrect"
+            assert pd.api.types.is_string_dtype(df[nom]), f"{prefixe} : {nom} n'est pas du texte"
 
-        horodatage = schema.field("date_heure").type
-        assert pa.types.is_timestamp(horodatage), f"{prefixe} : date_heure n'est pas un timestamp"
-        assert horodatage.tz == "UTC", f"{prefixe} : date_heure n'est pas en UTC"
+        assert df["date"].notna().all(), f"{prefixe} : dates manquantes"
+        assert df["date"].map(
+            lambda x: isinstance(x, date) and not isinstance(x, datetime)
+        ).all(), f"{prefixe} : type de date incorrect"
 
+        assert pd.api.types.is_datetime64_any_dtype(df["date_heure"]), (
+            f"{prefixe} : date_heure n'est pas un timestamp"
+        )
+        assert str(df["date_heure"].dt.tz) == "UTC", (
+            f"{prefixe} : date_heure n'est pas en UTC"
+        )
         for nom in PUISSANCES:
-            assert pa.types.is_int64(schema.field(nom).type), f"{prefixe} : {nom} n'est pas entier"
+            assert pd.api.types.is_integer_dtype(df[nom]), f"{prefixe} : {nom} n'est pas entier"
         for nom in POURCENTAGES:
-            assert pa.types.is_float64(schema.field(nom).type), f"{prefixe} : {nom} n'est pas décimal"
+            assert pd.api.types.is_float_dtype(df[nom]), f"{prefixe} : {nom} n'est pas décimal"
 
 
 def test_pas_de_doublons(fichiers_par_periode):
     """Une région ne doit pas avoir deux observations au même instant UTC."""
     for prefixe, (chemin, _) in fichiers_par_periode.items():
-        horaires = set()
-        parquet = pq.ParquetFile(chemin)
+        colonnes = ["code_insee_region", "date", "date_heure", "heure"]
+        df = pd.read_parquet(chemin, columns=colonnes)
+        assert df[colonnes].notna().all().all(), f"{prefixe} : date ou région manquante"
 
-        # Lecture par lots : on ne charge pas toutes les colonnes en mémoire.
-        for lot in parquet.iter_batches(
-            batch_size=1000,
-            columns=["code_insee_region", "date", "date_heure", "heure"],
-        ):
-            colonnes = lot.to_pydict()
-            for region, jour, instant, heure in zip(
-                colonnes["code_insee_region"],
-                colonnes["date"],
-                colonnes["date_heure"],
-                colonnes["heure"],
-            ):
-                assert region is not None and jour is not None and instant is not None and heure is not None, (
-                    f"{prefixe} : région, date, heure ou date_heure manquante"
-                )
-                assert not heure_locale_inexistante({"date": jour.isoformat(), "heure": heure}), (
-                    f"{prefixe} : heure locale inexistante {jour} {heure}"
-                )
-                cle = (region, instant)
-                assert cle not in horaires, f"{prefixe} : doublon {cle}"
-                horaires.add(cle)
+        heures_invalides = df.apply(
+            lambda ligne: heure_locale_inexistante(
+                {"date": ligne["date"].isoformat(), "heure": ligne["heure"]}
+            ),
+            axis=1,
+        )
+        assert not heures_invalides.any(), f"{prefixe} : une heure inexistante est présente"
+        assert not df.duplicated(subset=["code_insee_region", "date_heure"]).any(), (
+            f"{prefixe} : doublon région/date_heure"
+        )

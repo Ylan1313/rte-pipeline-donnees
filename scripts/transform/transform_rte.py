@@ -1,12 +1,11 @@
-"""Transforme les JSON Lines RTE en Parquet, par région et par mois."""
+"""Transforme les JSON Lines RTE en Parquet avec Pandas, par région et par mois."""
 
 import json
 from collections import defaultdict
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from pathlib import Path
 
-import pyarrow as pa
-import pyarrow.parquet as pq
+import pandas as pd
 
 RAW_DIR = Path("data/raw")
 PROCESSED_DIR = Path("data/processed")
@@ -25,14 +24,7 @@ POURCENTAGES = (
     "tco_hydraulique", "tch_hydraulique",
     "tco_bioenergies", "tch_bioenergies",
 )
-
-SCHEMA = pa.schema(
-    [pa.field(nom, pa.string()) for nom in TEXTES]
-    + [pa.field("date", pa.date32())]
-    + [pa.field("date_heure", pa.timestamp("us", tz="UTC"))]
-    + [pa.field(nom, pa.int64()) for nom in PUISSANCES]
-    + [pa.field(nom, pa.float64()) for nom in POURCENTAGES]
-)
+COLONNES = list(TEXTES) + ["date", "date_heure"] + list(PUISSANCES) + list(POURCENTAGES)
 
 
 def heure_locale_inexistante(enregistrement):
@@ -41,42 +33,45 @@ def heure_locale_inexistante(enregistrement):
     if jour.month != 3:
         return False
 
-    # En France métropolitaine, le dernier dimanche de mars saute de 02:00 à 03:00.
     dernier_mars = date(jour.year, 4, 1) - timedelta(days=1)
     changement = dernier_mars - timedelta(days=(dernier_mars.weekday() + 1) % 7)
     return jour == changement and enregistrement["heure"].startswith("02:")
 
 
-def nombre_ou_null(valeur, conversion):
-    """Remplace les valeurs numériques absentes/non valides par null."""
-    if valeur is None or valeur == "":
-        return None
-    try:
-        return conversion(valeur)
-    except (TypeError, ValueError):
-        return None
+def nettoyer_lot(enregistrements):
+    """Nettoie et type un lot avec Pandas, sans modifier les données brutes."""
+    df = pd.DataFrame(enregistrements)
+    a_ecarter = df.apply(heure_locale_inexistante, axis=1)
+    nb_ecartees = int(a_ecarter.sum())
+    df = df.loc[~a_ecarter].copy()
+    if df.empty:
+        return df, nb_ecartees
 
+    for colonne in TEXTES:
+        if colonne not in df.columns:
+            df[colonne] = pd.NA
+        df[colonne] = df[colonne].astype("string").str.strip()
 
-def nettoyer(enregistrement):
-    """Sélectionne les champs utiles et leur attribue un type stable."""
-    ligne = {}
-    for nom in TEXTES:
-        valeur = enregistrement.get(nom)
-        ligne[nom] = str(valeur).strip() if valeur is not None else None
+    df["date"] = pd.to_datetime(df["date"], format="%Y-%m-%d").dt.date
+    df["date_heure"] = pd.to_datetime(df["date_heure"], utc=True)
 
-    ligne["date"] = date.fromisoformat(enregistrement["date"])
-    ligne["date_heure"] = datetime.fromisoformat(
-        enregistrement["date_heure"].replace("Z", "+00:00")
-    )
-    for nom in PUISSANCES:
-        ligne[nom] = nombre_ou_null(enregistrement.get(nom), int)
-    for nom in POURCENTAGES:
-        ligne[nom] = nombre_ou_null(enregistrement.get(nom), float)
-    return ligne
+    for colonne in PUISSANCES:
+        if colonne not in df.columns:
+            df[colonne] = pd.NA
+        valeurs = pd.to_numeric(df[colonne], errors="coerce")
+        # Une puissance non entière ou absente est enregistrée comme valeur manquante.
+        df[colonne] = valeurs.where(valeurs.isna() | (valeurs % 1 == 0)).astype("Int64")
+
+    for colonne in POURCENTAGES:
+        if colonne not in df.columns:
+            df[colonne] = pd.NA
+        df[colonne] = pd.to_numeric(df[colonne], errors="coerce").astype("float64")
+
+    return df[COLONNES], nb_ecartees
 
 
 def fichiers_par_periode():
-    """Regroupe les pages brutes sans les charger en mémoire."""
+    """Regroupe les fichiers JSON Lines par région et par mois."""
     groupes = defaultdict(list)
     for fichier in sorted(RAW_DIR.glob("*_page_*.jsonl")):
         prefixe, separateur, numero = fichier.stem.rpartition("_page_")
@@ -86,40 +81,47 @@ def fichiers_par_periode():
 
 
 def transformer_periode(prefixe, fichiers):
-    """Écrit un seul Parquet pour une période, par lots de 1 000 lignes."""
+    """Traite les lignes par lots et écrit un Parquet par région/mois."""
+    lots_propres = []
+    lot = []
+    nb_ecartees = 0
+
+    for fichier in fichiers:
+        with fichier.open("r", encoding="utf-8") as source:
+            for texte in source:
+                if not texte.strip():
+                    continue
+                lot.append(json.loads(texte))
+                if len(lot) >= TAILLE_LOT:
+                    df_lot, nb = nettoyer_lot(lot)
+                    if not df_lot.empty:
+                        lots_propres.append(df_lot)
+                    nb_ecartees += nb
+                    lot.clear()
+
+    if lot:
+        df_lot, nb = nettoyer_lot(lot)
+        if not df_lot.empty:
+            lots_propres.append(df_lot)
+        nb_ecartees += nb
+
+    if not lots_propres:
+        raise ValueError(f"Aucune observation valide pour {prefixe}.")
+
+    # Seule la période en cours est réunie en mémoire, jamais tout le dataset.
+    df = pd.concat(lots_propres, ignore_index=True)
     destination = PROCESSED_DIR / f"{prefixe}.parquet"
     temporaire = PROCESSED_DIR / f"{prefixe}.parquet.tmp"
-    lot = []
-    lignes = 0
-    ecartees = 0
 
     try:
-        with pq.ParquetWriter(temporaire, SCHEMA, compression="snappy") as writer:
-            for fichier in fichiers:
-                with fichier.open("r", encoding="utf-8") as source:
-                    for texte in source:
-                        if not texte.strip():
-                            continue
-                        enregistrement = json.loads(texte)
-                        if heure_locale_inexistante(enregistrement):
-                            ecartees += 1
-                            continue
-                        lot.append(nettoyer(enregistrement))
-                        if len(lot) >= TAILLE_LOT:
-                            writer.write_table(pa.Table.from_pylist(lot, schema=SCHEMA))
-                            lignes += len(lot)
-                            lot.clear()
-            if lot:
-                writer.write_table(pa.Table.from_pylist(lot, schema=SCHEMA))
-                lignes += len(lot)
-
+        df.to_parquet(temporaire, index=False, engine="pyarrow", compression="snappy")
         temporaire.replace(destination)
     except Exception:
         temporaire.unlink(missing_ok=True)
         raise
 
-    print(f"{destination.name} : {lignes} lignes, {ecartees} heures inexistantes écartées.")
-    return lignes
+    print(f"{destination.name} : {len(df)} lignes, {nb_ecartees} heures inexistantes écartées.")
+    return len(df)
 
 
 def main():

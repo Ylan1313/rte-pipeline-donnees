@@ -2,7 +2,8 @@
 # Collecte depuis l'API
 aiohttp>=3.10
 
-# Transformation JSON Lines vers Parquet
+# Transformation et tests avec Pandas, écriture Parquet avec le moteur PyArrow
+pandas>=2.2
 pyarrow>=19.0
 
 # Tests automatisés
