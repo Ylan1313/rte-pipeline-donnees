@@ -1,0 +1,9 @@
+# Dépendances du pipeline RTE
+# Collecte depuis l'API
+aiohttp>=3.10
+
+# Transformation JSON Lines vers Parquet
+pyarrow>=19.0
+
+# Tests automatisés
+pytest>=8.0
