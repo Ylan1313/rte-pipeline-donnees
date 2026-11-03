@@ -1,8 +1,10 @@
-"""Collecte pilote : éCO2mix Grand Est, janvier 2025 (données brutes JSON Lines)."""
+"""Collecte éCO2mix par région et par mois (données brutes JSON Lines)."""
 
+import argparse
 import asyncio
 import json
 import random
+from datetime import date
 from pathlib import Path
 
 import aiohttp
@@ -11,18 +13,47 @@ URL = (
     "https://odre.opendatasoft.com/api/explore/v2.1/catalog/datasets/"
     "eco2mix-regional-cons-def/records"
 )
+REGION = "44"
+MOIS = "2025-01"
 WHERE = 'code_insee_region = "44" AND startswith(date, "2025-01-")'
+PREFIXE = "eco2mix_grand_est_2025_01"
 PAGE_SIZE = 100
 MAX_CONCURRENT = 5
 MAX_RETRIES = 3
 RAW_DIR = Path("data/raw")
-CHECKPOINT = RAW_DIR / "eco2mix_grand_est_2025_01_checkpoint.json"
+CHECKPOINT = RAW_DIR / f"{PREFIXE}_checkpoint.json"
 
 semaphore = asyncio.Semaphore(MAX_CONCURRENT)
 
 
+def configurer_collecte(region, mois):
+    """Choisit la région, le mois et les noms de fichiers associés."""
+    global REGION, MOIS, WHERE, PREFIXE, CHECKPOINT
+
+    if len(region) != 2 or not region.isdigit():
+        raise ValueError("La région doit être un code INSEE à deux chiffres.")
+    if len(mois) != 7 or mois[4] != "-":
+        raise ValueError("Le mois doit être au format AAAA-MM.")
+    try:
+        date.fromisoformat(f"{mois}-01")
+    except ValueError as erreur:
+        raise ValueError("Le mois doit être une date valide au format AAAA-MM.") from erreur
+
+    REGION = region
+    MOIS = mois
+    WHERE = f'code_insee_region = "{region}" AND startswith(date, "{mois}-")'
+
+    # Garder les noms existants pour le Grand Est (test pytest et checkpoint).
+    mois_fichier = mois.replace("-", "_")
+    if region == "44":
+        PREFIXE = f"eco2mix_grand_est_{mois_fichier}"
+    else:
+        PREFIXE = f"eco2mix_region_{region}_{mois_fichier}"
+    CHECKPOINT = RAW_DIR / f"{PREFIXE}_checkpoint.json"
+
+
 def page_path(page_number):
-    return RAW_DIR / f"eco2mix_grand_est_2025_01_page_{page_number:05d}.jsonl"
+    return RAW_DIR / f"{PREFIXE}_page_{page_number:05d}.jsonl"
 
 
 async def fetch_page(session, offset):
@@ -54,8 +85,8 @@ async def fetch_page(session, offset):
 
 
 def verifier_observation(record):
-    if str(record["code_insee_region"]) != "44" or not record["date"].startswith("2025-01-"):
-        raise ValueError("Enregistrement hors du Grand Est ou de janvier 2025")
+    if str(record["code_insee_region"]) != REGION or not record["date"].startswith(f"{MOIS}-"):
+        raise ValueError("Enregistrement hors de la région ou du mois demandés")
 
 
 def compter_page_existante(page_number, attendu):
@@ -156,9 +187,20 @@ async def main():
         raise ValueError(f"Collecte incomplète : {collected}/{total}")
 
     print(f"Collecte terminée : {collected} enregistrements.")
+    print(f"Région : {REGION} ; mois : {MOIS}.")
     print(f"Pages déjà présentes : {deja_presentes}.")
     print(f"Fichiers JSON Lines enregistrés dans : {RAW_DIR}")
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Collecte des données RTE par région et par mois.")
+    parser.add_argument("--region", default="44", help="Code INSEE (44 = Grand Est).")
+    parser.add_argument("--mois", default="2025-01", help="Mois au format AAAA-MM.")
+    options = parser.parse_args()
+
+    try:
+        configurer_collecte(options.region, options.mois)
+    except ValueError as erreur:
+        parser.error(str(erreur))
+
     asyncio.run(main())
