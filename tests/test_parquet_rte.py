@@ -1,11 +1,14 @@
 """Tests des fichiers Parquet issus de la collecte RTE."""
 
+import json
 from collections import defaultdict
 from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+
+from scripts.transform.transform_rte import heure_locale_inexistante
 
 RACINE = Path(__file__).resolve().parents[1]
 RAW_DIR = RACINE / "data" / "raw"
@@ -24,6 +27,21 @@ POURCENTAGES = (
     "tco_hydraulique", "tch_hydraulique",
     "tco_bioenergies", "tch_bioenergies",
 )
+
+
+def test_reperage_heures_inexistantes():
+    """Le créneau 02:00-02:59 manque seulement au dernier dimanche de mars."""
+    exemples = (
+        ("2025-03-30", "02:00", True),
+        ("2025-03-30", "02:30", True),
+        ("2025-03-30", "03:00", False),
+        ("2025-03-29", "02:00", False),
+        ("2025-10-26", "02:00", False),
+        ("2024-03-31", "02:30", True),
+        ("2026-03-29", "02:00", True),
+    )
+    for jour, heure, attendu in exemples:
+        assert heure_locale_inexistante({"date": jour, "heure": heure}) is attendu
 
 
 @pytest.fixture(scope="module")
@@ -47,18 +65,25 @@ def fichiers_par_periode():
 
 
 def test_parquet_lisibles_et_nombre_de_lignes(fichiers_par_periode):
-    """Chaque Parquet contient autant de lignes que ses pages JSON Lines."""
+    """Chaque Parquet conserve les lignes brutes, sauf horaires inexistants."""
     for prefixe, (chemin, fichiers_bruts) in fichiers_par_periode.items():
         parquet = pq.ParquetFile(chemin)
         nb_brut = 0
+        nb_ecartees = 0
         for fichier in fichiers_bruts:
             with fichier.open("r", encoding="utf-8") as source:
-                nb_brut += sum(1 for ligne in source if ligne.strip())
+                for ligne in source:
+                    if not ligne.strip():
+                        continue
+                    nb_brut += 1
+                    if heure_locale_inexistante(json.loads(ligne)):
+                        nb_ecartees += 1
 
         assert nb_brut > 0, f"Aucune ligne brute : {prefixe}"
-        assert parquet.metadata.num_rows == nb_brut, (
+        attendu = nb_brut - nb_ecartees
+        assert parquet.metadata.num_rows == attendu, (
             f"{prefixe} : {parquet.metadata.num_rows} lignes Parquet "
-            f"au lieu de {nb_brut} lignes brutes."
+            f"au lieu de {attendu} ({nb_brut} brutes - {nb_ecartees} exclues)."
         )
 
 
@@ -90,16 +115,20 @@ def test_pas_de_doublons(fichiers_par_periode):
         # Lecture par lots : on ne charge pas toutes les colonnes en mémoire.
         for lot in parquet.iter_batches(
             batch_size=1000,
-            columns=["code_insee_region", "date", "date_heure"],
+            columns=["code_insee_region", "date", "date_heure", "heure"],
         ):
             colonnes = lot.to_pydict()
-            for region, jour, instant in zip(
+            for region, jour, instant, heure in zip(
                 colonnes["code_insee_region"],
                 colonnes["date"],
                 colonnes["date_heure"],
+                colonnes["heure"],
             ):
-                assert region is not None and jour is not None and instant is not None, (
-                    f"{prefixe} : région, date ou date_heure manquante"
+                assert region is not None and jour is not None and instant is not None and heure is not None, (
+                    f"{prefixe} : région, date, heure ou date_heure manquante"
+                )
+                assert not heure_locale_inexistante({"date": jour.isoformat(), "heure": heure}), (
+                    f"{prefixe} : heure locale inexistante {jour} {heure}"
                 )
                 cle = (region, instant)
                 assert cle not in horaires, f"{prefixe} : doublon {cle}"

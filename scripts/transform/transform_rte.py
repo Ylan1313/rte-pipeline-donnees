@@ -2,7 +2,7 @@
 
 import json
 from collections import defaultdict
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pyarrow as pa
@@ -33,6 +33,18 @@ SCHEMA = pa.schema(
     + [pa.field(nom, pa.int64()) for nom in PUISSANCES]
     + [pa.field(nom, pa.float64()) for nom in POURCENTAGES]
 )
+
+
+def heure_locale_inexistante(enregistrement):
+    """Repère l'heure 02:00-02:59 absente au passage à l'été en France métropolitaine."""
+    jour = date.fromisoformat(enregistrement["date"])
+    if jour.month != 3:
+        return False
+
+    # En France métropolitaine, le dernier dimanche de mars saute de 02:00 à 03:00.
+    dernier_mars = date(jour.year, 4, 1) - timedelta(days=1)
+    changement = dernier_mars - timedelta(days=(dernier_mars.weekday() + 1) % 7)
+    return jour == changement and enregistrement["heure"].startswith("02:")
 
 
 def nombre_ou_null(valeur, conversion):
@@ -79,6 +91,7 @@ def transformer_periode(prefixe, fichiers):
     temporaire = PROCESSED_DIR / f"{prefixe}.parquet.tmp"
     lot = []
     lignes = 0
+    ecartees = 0
 
     try:
         with pq.ParquetWriter(temporaire, SCHEMA, compression="snappy") as writer:
@@ -87,7 +100,11 @@ def transformer_periode(prefixe, fichiers):
                     for texte in source:
                         if not texte.strip():
                             continue
-                        lot.append(nettoyer(json.loads(texte)))
+                        enregistrement = json.loads(texte)
+                        if heure_locale_inexistante(enregistrement):
+                            ecartees += 1
+                            continue
+                        lot.append(nettoyer(enregistrement))
                         if len(lot) >= TAILLE_LOT:
                             writer.write_table(pa.Table.from_pylist(lot, schema=SCHEMA))
                             lignes += len(lot)
@@ -101,7 +118,7 @@ def transformer_periode(prefixe, fichiers):
         temporaire.unlink(missing_ok=True)
         raise
 
-    print(f"{destination.name} : {lignes} lignes")
+    print(f"{destination.name} : {lignes} lignes, {ecartees} heures inexistantes écartées.")
     return lignes
 
 
