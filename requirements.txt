@@ -1,10 +1,12 @@
-# Dépendances du pipeline RTE
-# Collecte depuis l'API
+# Collecte asynchrone de l'API RTE
 aiohttp>=3.10
 
-# Transformation et tests avec Pandas, écriture Parquet avec le moteur PyArrow
+# Nettoyage Pandas et format Parquet
 pandas>=2.2
 pyarrow>=19.0
+
+# Chargement PostgreSQL (compatible Python 3.13)
+psycopg[binary]>=3.2
 
 # Tests automatisés
 pytest>=8.0
