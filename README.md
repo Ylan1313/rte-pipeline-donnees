@@ -97,3 +97,63 @@ et la procédure de reproduction. **Ne pas exécuter tout
 `sql/03_optimisation.sql` d'un coup** : le bloc 3 contient une commande de
 création d'index ; l'index étant déjà présent, ce bloc est inutile ici.
 
+## Publication des Parquet sur Hugging Face Hub
+
+**Méthode du cours :** `huggingface_hub.HfApi().upload_folder()` avec les
+Parquet de `data/processed/`, sans refaire la transformation avec `datasets`.
+Le script crée si nécessaire un **dépôt dataset privé**, ajoute la
+[Dataset Card](docs/huggingface_dataset_card.md), puis crée un tag
+`v1.0.0` **après** les fichiers et leur documentation.
+
+La licence d'origine a été vérifiée : **Licence Ouverte v2.0 (Etalab)**
+du producteur **RTE**, avec attribution et lien vers la source. La Dataset
+Card décrit la provenance, les 31 colonnes, les 12 régions, les dates,
+les limites et la méthode de nettoyage.
+
+**Commandes PowerShell depuis la racine du dépôt :**
+
+```powershell
+py -m pip install -r requirements.txt
+py -m pytest tests\test_publish_hf.py -v
+# À remplacer par TON identifiant Hugging Face, pas ton compte GitHub :
+py scripts\publish\publish_hf.py --repo-id UTILISATEUR/rte-eco2mix-regional-2025
+```
+
+La dernière commande est une **pré-vérification locale sans publication** :
+elle affiche le nombre de Parquet, les observations et contrôle la clé
+`(code_insee_region, date_heure)`. Elle ne demande aucun jeton.
+
+Pour publier **uniquement après validation de cette pré-vérification**,
+créer un jeton Hugging Face avec le droit d'écriture sur les datasets depuis
+les [paramètres de compte](https://huggingface.co/settings/tokens).
+Le stocker en mémoire dans la session PowerShell **sans l'afficher** :
+
+```powershell
+$secret = Read-Host "Jeton Hugging Face (masqué)" -AsSecureString
+$env:HF_TOKEN = [System.Net.NetworkCredential]::new("", $secret).Password
+Remove-Variable secret
+py scripts\publish\publish_hf.py --repo-id UTILISATEUR/rte-eco2mix-regional-2025 --publish
+Remove-Item Env:HF_TOKEN
+```
+
+Remplacer `UTILISATEUR` par le nom du compte ou de l'organisation HF
+autorisée. Aucun mot de passe, jeton ni fichier Parquet n'est conservé sur
+GitHub. Le script **refuse de publier dans un dépôt public**, contrôle les
+fichiers distants déjà présents et **refuse d'écraser un tag existant** ;
+pour une nouvelle version, utiliser `--tag v1.1.0` après validation des
+changements. Un dépôt privé n'est visible qu'aux personnes autorisées.
+
+Après un envoi réussi, le script affiche :
+`https://huggingface.co/datasets/UTILISATEUR/rte-eco2mix-regional-2025/tree/v1.0.0`.
+Vérifier les fichiers `data/*.parquet`, la Dataset Card et le tag sur
+Hugging Face. Pour charger la version privée avec `datasets` :
+
+```python
+from datasets import load_dataset
+ds = load_dataset("UTILISATEUR/rte-eco2mix-regional-2025", revision="v1.0.0", token=True)
+print(ds["train"].num_rows)
+```
+
+N'utiliser `load_dataset` qu'après publication et authentification HF.
+La publication **n'est pas automatique** depuis GitHub : le script doit
+être exécuté depuis le PC qui contient les Parquet.

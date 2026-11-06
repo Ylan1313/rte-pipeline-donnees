@@ -10,3 +10,6 @@ psycopg[binary]>=3.2
 
 # Tests automatisés
 pytest>=8.0
+
+# Publication des Parquet sur Hugging Face Hub (méthode HfApi du cours)
+huggingface_hub>=0.35
