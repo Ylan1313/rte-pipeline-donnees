@@ -20,8 +20,10 @@ DATASET_CARD = RACINE / "docs" / "huggingface_dataset_card.md"
 COLONNES_CLE = ["code_insee_region", "date_heure"]
 
 
-def verifier_parquets(dossier=PARQUETS):
+def verifier_parquets(dossier=None):
     """Vérifie les fichiers et la clé région/instant sans charger les 31 colonnes."""
+    if dossier is None:
+        dossier = PARQUETS
     fichiers = sorted(dossier.glob("eco2mix_*.parquet"))
     if not fichiers:
         raise ValueError("Aucun Parquet : lancer d'abord la collecte et la transformation.")
