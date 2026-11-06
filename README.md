@@ -79,16 +79,21 @@ Dans Supabase, ouvrir **SQL Editor** → **New query**, copier une requête comp
 
 ## Optimisation PostgreSQL : index et EXPLAIN ANALYZE
 
-Le fichier [sql/03_optimisation.sql](sql/03_optimisation.sql) permet de **mesurer avant/après la création d'un index** sur \`("date", code_insee_region)\`, complémentaire de l'index déjà créé par la clé primaire \`(code_insee_region, date_heure)\`.
+Le script [`sql/03_optimisation.sql`](sql/03_optimisation.sql) contient deux
+requêtes de mesure (une journée, un mois), un index complémentaire sur
+`("date", code_insee_region)` et les commandes `EXPLAIN (ANALYZE, BUFFERS)`.
 
-**Mode d'emploi (Supabase → SQL Editor)** :
+**Les mesures ont déjà été réalisées sur Supabase.** L'index existait lors
+des premières mesures : il ne s'agit pas d'un vrai historique avant/après
+création. Les parcours séquentiels ont été imposés temporairement pour
+comparer différentes stratégies, sans supprimer d'index.
 
-1. Ouvrir \`sql/03_optimisation.sql\` sur GitHub. Exécuter uniquement le **bloc 0** et vérifier que \`idx_rte_eco2mix_date_region\` n'existe pas encore. S'il existe déjà, la comparaison « avant » n'est pas valable sans rétablir un état sans cet index.
-2. Exécuter le **bloc 1** (\`ANALYZE\` : statistiques du planificateur, sans modifier les observations).
-3. Exécuter **2A puis 2B**, séparément. Noter pour chacun la valeur \`Execution Time\` en ms, le type de scan (\`Seq Scan\`, \`Index Scan\`, \`Bitmap Heap Scan\`, etc.) et les buffers affichés.
-4. Exécuter le **bloc 3** une seule fois : \`CREATE INDEX IF NOT EXISTS\` crée l'index complémentaire.
-5. Exécuter **4A puis 4B** : ce sont **exactement les mêmes requêtes** que 2A et 2B. Comparer les plans et les temps, puis vérifier l'index avec le **bloc 5**.
+**Lire le compte rendu détaillé :**
+[`docs/optimisation_postgresql.md`](docs/optimisation_postgresql.md).
 
-**Comment interpréter :** le plan de 2A/4A filtre une seule journée (30 mars 2025), celui de 2B/4B un mois entier (mars 2025). Un index peut aider une requête sélective mais ne pas être choisi pour une requête large ; c'est normal. Répéter idéalement chaque mesure plusieurs fois, noter la variabilité due au cache/à la charge serveur, et **ne pas affirmer une accélération si elle n'est pas observée**. \`Execution Time\` est le temps d'exécution indiqué par PostgreSQL, distinct du temps réseau du navigateur.
+Ce document rassemble les temps réellement observés (dont trois
+répétitions du test mensuel), les types de scans, les limites de comparaison
+et la procédure de reproduction. **Ne pas exécuter tout
+`sql/03_optimisation.sql` d'un coup** : le bloc 3 contient une commande de
+création d'index ; l'index étant déjà présent, ce bloc est inutile ici.
 
-**Traçabilité :** reporter les résultats **réellement obtenus** (sans mots de passe ni identifiants de connexion) dans la documentation lors de la phase finale. Exécuter les blocs SQL séparément : le fichier contient aussi la commande de création d'index.
