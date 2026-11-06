@@ -66,3 +66,13 @@ Ce projet utilise **PostgreSQL**, comme le TP du cours (par exemple via Supabase
 **Relançable sans doublons :** la clé primaire est `(code_insee_region, date_heure)`. Chaque Parquet est chargé dans une transaction avec `COPY` et `ON CONFLICT DO UPDATE`. Les données brutes et les Parquet restent intacts.
 
 **Sécurité :** la connexion utilise SSL. Utiliser une URL PostgreSQL (pas une clé API Supabase) ; ne jamais versionner les identifiants ni les fichiers `data/`.
+
+## Analyses SQL (CTE et fonctions de fenêtrage)
+
+Le fichier [sql/02_analyses.sql](sql/02_analyses.sql) contient **8 requêtes PostgreSQL indépendantes**, adaptées au TP2 : vérification du chargement, RANK, ROW_NUMBER, LAG, SUM OVER, AVG OVER (moyenne mobile), NTILE et CTE récursive.
+
+Dans Supabase, ouvrir **SQL Editor** → **New query**, copier une requête complète (jusqu'à son point-virgule) et cliquer sur **Run**. Recommencer pour les requêtes suivantes. Ces SELECT ne modifient pas les données.
+
+**Contrôle initial :** pour la collecte historique janvier–mars 2025, la requête 1 doit afficher 12 régions chaque mois et respectivement 17 856, 16 128 et 17 832 observations. Le total est de 51 816 lignes ; les résultats évoluent naturellement si d'autres mois ont été chargés.
+
+**Unités :** la consommation RTE est une puissance (MW). Les classements portent sur des *moyennes en MW* et non sur une somme de MW ; la requête 5 utilise une estimation d'énergie en MWh par demi-heure, explicitement annoncée comme approximation.
